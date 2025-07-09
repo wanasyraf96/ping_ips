@@ -39,9 +39,9 @@ ping_ip() {
     fi
 
     if [ -n "$alias" ]; then
-        printf "ping %-15s %-18s: " "$ip" "($alias)"
+        printf "%-15s %-18s: " "$ip" "($alias)"
     else
-        printf "ping %-15s %-18s: " "$ip" ""
+        printf "%-15s %-18s: " "$ip" ""
     fi
 
     if ping -c 1 -W 1 "$ip" > /dev/null 2>&1; then
