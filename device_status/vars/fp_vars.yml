@@ -1,0 +1,20 @@
+---
+# Shared settings for fp_maintenance.yml.
+# Loaded via vars_files in every play: the implicit `localhost` host does not
+# reliably inherit group_vars/all, and the controller plays need these too.
+
+# Where run reports are written (relative to the playbook directory).
+fp_report_dir: reports
+
+# Paths are relative to the remote login user's $HOME, resolved at run time
+# from ansible_env.HOME rather than a literal "~" so there is no ambiguity
+# about which user's home is meant when become is in play.
+fp_log_rel: app/fp.log
+fp_reset_rel: pythonCode/reset_6lp.py
+
+# systemd unit to restart.
+fp_service: fp
+
+# reset_6lp.py can take ~5 minutes; 330s leaves headroom before the hard cut.
+fp_reset_interpreter: python3
+fp_reset_timeout: 330

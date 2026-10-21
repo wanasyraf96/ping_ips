@@ -1,0 +1,249 @@
+---
+# =============================================================================
+# fp_maintenance.yml -- preflight-gated FP service maintenance
+# =============================================================================
+# Stage 1  ICMP ping every endpoint from the controller.
+# Stage 2  TCP-check the SSH endpoint: nc -vz -w 10 <ip> <port>
+# Stage 3  On hosts that passed BOTH gates, over SSH:
+#            i.   remove ~/app/fp.log
+#            ii.  systemctl restart fp   (via become)
+#            iii. run ~/pythonCode/reset_6lp.py if present (allow ~5 min)
+# Stage 4  Render a Markdown summary report covering every audited host.
+#
+# Stages 1-2 run from the controller (delegate_to: localhost) because an
+# offline host cannot be asked whether it is offline. Facts are NOT gathered
+# up front for the same reason -- an implicit gather would hang on dead hosts
+# before the gates ever ran. Stage 3 gathers only the 'env' subset, and only
+# on hosts that cleared both gates.
+#
+# AUTHENTICATION
+#   These gateways use username + password, not SSH keys. Either be prompted:
+#       -u <user> -k -K      -k = SSH password, -K = sudo password
+#   ...or store them once in an encrypted vault and drop the flags:
+#       cp group_vars/smart_toilet/vault.yml.example \
+#          group_vars/smart_toilet/vault.yml
+#       ansible-vault encrypt group_vars/smart_toilet/vault.yml
+#       ansible-playbook fp_maintenance.yml --ask-vault-pass
+#   -k requires sshpass (brew install sshpass).
+#
+# USAGE
+#   ansible-playbook fp_maintenance.yml -u <user> -k -K              # target=simcard
+#   ansible-playbook fp_maintenance.yml -u <user> -k -K -e target=vpn
+#   ansible-playbook fp_maintenance.yml -u <user> -k -K --check      # no writes
+#   ansible-playbook fp_maintenance.yml -u <user> -k -K \
+#       --limit dataran_ppj_male_simcard                             # one host
+#
+# --check still performs the real ping/nc probes (they are check_mode: false)
+# but performs no remote mutation, so it doubles as a reachability audit.
+#
+# TARGET SELECTION -- READ THIS
+#   The `simcard` and `vpn` groups contain the SAME 13 physical devices via
+#   two different routes. Targeting `smart_toilet` (all 52) would restart the
+#   service twice and run reset_6lp.py twice on those units. Pick ONE route
+#   per run. Default is `simcard`.
+# =============================================================================
+
+- name: Prepare controller
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars_files: [vars/fp_vars.yml]
+  tasks:
+    - name: Detect controller platform
+      ansible.builtin.command: uname -s
+      register: fp_uname
+      changed_when: false
+      check_mode: false
+
+    - name: Set controller-local run facts
+      ansible.builtin.set_fact:
+        # ping timeout flags are NOT portable:
+        #   Darwin  -t <sec>  exit after N seconds regardless  (-W is millisec)
+        #   Linux   -W <sec>  seconds to wait for a reply      (-t is TTL)
+        # Using the wrong one is a 1000x error in either direction.
+        fp_ping_args: "{{ '-c 1 -t 3' if fp_uname.stdout == 'Darwin' else '-c 1 -W 3' }}"
+        fp_stamp: "{{ now(true, '%Y-%m-%dT%H:%M:%SZ') }}"
+        fp_slug: "{{ now(true, '%Y%m%d-%H%M%S') }}"
+
+    - name: Ensure the report directory exists
+      ansible.builtin.file:
+        path: "{{ fp_report_dir }}"
+        state: directory
+        mode: "0755"
+      check_mode: false
+
+- name: Preflight gates and FP maintenance
+  hosts: "{{ target | default('simcard') }}"
+  gather_facts: false
+  serial: "{{ batch | default(100) }}"
+  vars_files: [vars/fp_vars.yml]
+  vars:
+    # Honour the user's spec: a host must answer ICMP *and* accept TCP before
+    # it is touched. Cellular gateways sometimes drop ICMP while forwarding
+    # TCP fine -- if you see ping=FAIL / port=OK pairs in the report, rerun
+    # with -e require_ping=false to act on the TCP result alone.
+    require_ping: true
+    nc_timeout: 10
+    ssh_port: "{{ ansible_port | default(22) }}"
+    ping_args: "{{ hostvars['localhost'].fp_ping_args }}"
+  tasks:
+
+    # ---- Stage 1: ICMP ------------------------------------------------------
+    - name: "1. ping {{ ansible_host }}"
+      ansible.builtin.command: "ping {{ ping_args }} {{ ansible_host }}"
+      delegate_to: localhost
+      register: fp_ping
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # ---- Stage 2: TCP port forward -----------------------------------------
+    - name: "2. nc -vz -w {{ nc_timeout }} {{ ansible_host }} {{ ssh_port }}"
+      ansible.builtin.command: "nc -vz -w {{ nc_timeout }} {{ ansible_host }} {{ ssh_port }}"
+      delegate_to: localhost
+      register: fp_nc
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Evaluate the gates
+      ansible.builtin.set_fact:
+        fp_online: "{{ fp_ping.rc == 0 }}"
+        fp_port_ok: "{{ fp_nc.rc == 0 }}"
+        fp_eligible: "{{ fp_nc.rc == 0 and (fp_ping.rc == 0 or not require_ping) }}"
+
+    - name: Report hosts held back by the gates
+      ansible.builtin.debug:
+        msg: >-
+          SKIPPING {{ inventory_hostname }} ({{ ansible_host }}:{{ ssh_port }}) --
+          ping={{ 'OK' if fp_online else 'FAIL' }}
+          port={{ 'OK' if fp_port_ok else 'FAIL' }}
+      when: not fp_eligible
+
+    # ---- Stage 3: remediation over SSH -------------------------------------
+    - name: Open the SSH session and read the remote environment
+      ansible.builtin.setup:
+        gather_subset: ["!all", "!min", "env"]
+      when: fp_eligible
+      register: fp_setup
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: Record SSH outcome
+      ansible.builtin.set_fact:
+        fp_home: "{{ ansible_env.HOME | default('') }}"
+        # The $HOME guard is a safety interlock, not a formality: if HOME came
+        # back empty, "{{ fp_home }}/app/fp.log" would resolve to the absolute
+        # path /app/fp.log and `state: absent` would delete it. Require a
+        # non-empty absolute path before any remote path is built. Read
+        # ansible_env directly here so this does not depend on set_fact key
+        # evaluation order.
+        fp_ssh_ok: >-
+          {{ fp_eligible and fp_setup is not skipped
+             and not (fp_setup.unreachable | default(false))
+             and fp_setup is not failed
+             and (ansible_env.HOME | default('')) is match('/.+') }}
+
+    - name: "3.i remove {{ fp_log_rel }}"
+      ansible.builtin.file:
+        path: "{{ fp_home }}/{{ fp_log_rel }}"
+        state: absent
+      when: fp_ssh_ok
+      register: fp_log
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: "3.ii restart {{ fp_service }}"
+      become: true
+      ansible.builtin.systemd_service:
+        name: "{{ fp_service }}"
+        state: restarted
+      when: fp_ssh_ok
+      register: fp_restart
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: "3.iii look for {{ fp_reset_rel }}"
+      ansible.builtin.stat:
+        path: "{{ fp_home }}/{{ fp_reset_rel }}"
+      when: fp_ssh_ok
+      register: fp_reset_stat
+      ignore_errors: true
+      ignore_unreachable: true
+      check_mode: false
+
+    - name: "3.iii run {{ fp_reset_rel }} (up to {{ fp_reset_timeout }}s)"
+      ansible.builtin.command:
+        cmd: "{{ fp_reset_interpreter }} {{ fp_home }}/{{ fp_reset_rel }}"
+        chdir: "{{ fp_home }}/{{ fp_reset_rel | dirname }}"
+      when: fp_ssh_ok and (fp_reset_stat.stat.exists | default(false))
+      register: fp_reset
+      # async gives this a hard ceiling; without it a wedged script would hold
+      # the SSH session open indefinitely.
+      async: "{{ fp_reset_timeout }}"
+      poll: 15
+      changed_when: fp_reset.rc | default(1) == 0
+      ignore_errors: true
+      ignore_unreachable: true
+
+    # ---- Stage 4 input: each host renders its own report row ----------------
+    - name: Record this host's report row
+      ansible.builtin.set_fact:
+        fp_row:
+          host: "{{ inventory_hostname }}"
+          site: "{{ site | default(inventory_hostname) }}"
+          route: "{{ 'vpn' if inventory_hostname is search('_vpn$') else 'simcard' }}"
+          endpoint: "{{ ansible_host }}:{{ ssh_port }}"
+          forwarded: "{{ 'yes' if ansible_port is defined else 'no' }}"
+          ping: "{{ 'OK' if fp_online else 'FAIL' }}"
+          port: "{{ 'OK' if fp_port_ok else 'FAIL' }}"
+          ssh: "{{ '--' if not fp_eligible else ('OK' if fp_ssh_ok else 'FAIL') }}"
+          log: >-
+            {{ '--' if fp_log is skipped
+               else ('ERROR' if fp_log is failed
+               else ('removed' if fp_log.changed else 'already absent')) }}
+          restart: >-
+            {{ '--' if fp_restart is skipped
+               else ('ERROR' if fp_restart is failed else 'restarted') }}
+          reset: >-
+            {{ '--' if fp_reset_stat is skipped or fp_reset_stat is failed
+               else ('not present' if not (fp_reset_stat.stat.exists | default(false))
+               else ('ERROR' if fp_reset is failed
+               else ('ran in ' ~ (fp_reset.delta | default('?'))))) }}
+          detail: >-
+            {{ (fp_nc.stderr | default(fp_nc.stdout | default('')) | trim)
+               if not fp_port_ok
+               else (fp_setup.msg | default('unreachable') | trim) if fp_eligible and not fp_ssh_ok
+               else (fp_restart.msg | default('') | trim) if fp_restart is failed
+               else (fp_reset.stderr | default(fp_reset.msg | default('')) | trim)
+                    if fp_reset is failed
+               else '' }}
+
+- name: Summary report
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars_files: [vars/fp_vars.yml]
+  vars:
+    # Derived from who actually ran the gates, so this stays correct under
+    # --limit (which `groups[...]` would ignore).
+    fp_audited: >-
+      {{ hostvars | dict2items
+         | selectattr('value.fp_row', 'defined')
+         | map(attribute='key') | list }}
+    fp_report_path: "{{ fp_report_dir }}/fp-maintenance-{{ fp_slug }}.md"
+  tasks:
+    - name: Render the report
+      ansible.builtin.template:
+        src: templates/fp_report.md.j2
+        dest: "{{ fp_report_path }}"
+        mode: "0644"
+      check_mode: false
+
+    - name: Print the report
+      ansible.builtin.debug:
+        msg: "{{ lookup('file', fp_report_path).split('\n') }}"
+
+    - name: Report location
+      ansible.builtin.debug:
+        msg: "Report written to {{ fp_report_path }}"

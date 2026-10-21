@@ -1,0 +1,25 @@
+---
+# Connection settings for every Smart Toilet gateway.
+# `simcard` and `vpn` are children of `smart_toilet`, so both inherit these.
+#
+# These devices authenticate with username + password, not SSH keys.
+# The credentials themselves belong in vault.yml (encrypted) -- never here.
+
+ansible_connection: ssh
+ansible_become_method: sudo
+
+# ---------------------------------------------------------------------------
+# DO NOT add `ansible_become: true` to this file.
+#
+# Only the systemctl task needs root, and it declares `become: true` itself.
+# Enabling become globally would make the fact-gathering step report *root's*
+# $HOME, so stage 3.i would delete /root/app/fp.log instead of the login
+# user's ~/app/fp.log -- the wrong file, on every host.
+# ---------------------------------------------------------------------------
+
+# These units are password-only. Offering keys first wastes round trips and can
+# trip "Too many authentication failures" on sshd configs with a low
+# MaxAuthTries, so disable pubkey auth outright.
+ansible_ssh_common_args: >-
+  -o PreferredAuthentications=password,keyboard-interactive
+  -o PubkeyAuthentication=no

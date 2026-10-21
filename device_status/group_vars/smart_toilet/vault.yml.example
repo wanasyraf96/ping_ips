@@ -1,0 +1,20 @@
+---
+# TEMPLATE -- copy, fill in, then encrypt. Do not put real credentials in this
+# .example file; it is meant to be committed, vault.yml is not.
+#
+#   cp group_vars/smart_toilet/vault.yml.example group_vars/smart_toilet/vault.yml
+#   $EDITOR group_vars/smart_toilet/vault.yml          # fill in real values
+#   ansible-vault encrypt group_vars/smart_toilet/vault.yml
+#
+# Then run with:   ansible-playbook fp_maintenance.yml --ask-vault-pass
+# Edit later with: ansible-vault edit group_vars/smart_toilet/vault.yml
+#
+# Only needed if you want unattended/repeat runs. For a one-off you can skip
+# the vault entirely and pass -u <user> -k -K to be prompted instead.
+
+ansible_user: CHANGE_ME
+ansible_password: CHANGE_ME
+
+# If sudo takes the same password as SSH, leave this line exactly as written.
+# If sudo is passwordless, delete it.
+ansible_become_password: "{{ ansible_password }}"

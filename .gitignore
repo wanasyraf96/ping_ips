@@ -1,1 +1,15 @@
 ips.txt
+
+# Generated from ips.txt -- same IP data, keep it out of git for the same reason.
+inventory.yml
+inventory.ini
+
+# Run reports embed every endpoint and its status.
+reports/
+
+# Credentials. Encrypted or not, these never belong in the repo; the committed
+# reference is group_vars/*/vault.yml.example.
+# No leading path: a pattern containing a slash is anchored to this file's own
+# directory, so "group_vars/*/vault.yml" would miss device_status/group_vars/.
+# A bare name matches at any depth. It does not match vault.yml.example.
+vault.yml

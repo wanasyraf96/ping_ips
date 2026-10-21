@@ -1,0 +1,23 @@
+# Test fixture mirroring device_status/ips.txt.
+# Format: <ip> (<TYPE> - <Location>[ - port NNNN])
+
+# ===============================
+# OFFICE (LAN — only reachable on-site)
+# ===============================
+192.168.1.246    (OFFICE - KPKT Male)
+192.168.1.104    (OFFICE - Souq Kiri / Jeti Putra Female)
+
+# ===============================
+# SIMCARD
+# ===============================
+121.120.41.25    (SIMCARD - Taman Bandar)
+121.120.38.219   (SIMCARD - Dataran PPJ Male - port 3000)
+121.120.209.108  (SIMCARD - MBSA Tasik Barat WB01 - port 3000 disabled)
+183.171.15.14    (SIMCARD - Souq Kanan / Medan Selera Putra OKU)
+
+# ===============================
+# VPN
+# ===============================
+10.21.3.151      (VPN - B13 Male)
+mps-gym.local    (VPN - Gym Selayang)
+# 192.168.2.???  (VPN - Dataran PPJ Female)  -- IP.md has "192.168.2." only, incomplete
